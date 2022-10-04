@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/sdk/resource"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
@@ -15,7 +13,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"os"
 	"os/exec"
-	"time"
 )
 
 type keyPkgAndTest struct {
@@ -51,9 +48,9 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	tracer := tp.Tracer("go test")
+	tracer := tp.Tracer("test/go")
 	ctx, span := tracer.Start(context.Background(), "go tests")
-	testlines := map[keyPkgAndTest][]GoTestLine{}
+	testlines := map[string][]GoTestLine{}
 	scanner := bufio.NewScanner(pipe)
 	for scanner.Scan() {
 		line := GoTestLine{}
@@ -62,8 +59,8 @@ func main() {
 			panic(err)
 		}
 
-		if line.Package != "" && line.Test != "" {
-			key := keyPkgAndTest{line.Package, line.Test}
+		if line.Package != "" {
+			key := line.Package
 			if _, exists := testlines[key]; !exists {
 				testlines[key] = make([]GoTestLine, 0)
 			}
@@ -75,52 +72,7 @@ func main() {
 		}
 	}
 
-	for k, lines := range testlines {
-		var start, end time.Time
-		failed := false
-
-		for _, t := range lines {
-			switch t.Action {
-			case "run":
-				if t.Time.IsZero() {
-					continue
-				}
-				start = t.Time
-			case "fail":
-				failed = true
-				fallthrough
-			case "pass":
-				if t.Time.IsZero() {
-					continue
-				}
-				if start.IsZero() {
-					start = t.Time.Add(-time.Duration(t.Elapsed))
-				}
-				end = t.Time
-			}
-		}
-
-		if start.IsZero() || end.IsZero() {
-			fmt.Println("either start or end is zero :(", start, end)
-			continue
-		}
-
-		_, span := tracer.Start(ctx, "ran test", trace.WithTimestamp(start))
-		span.SetAttributes(attribute.Key("package").String(k.Package), attribute.Key("test").String(k.Test))
-		if failed {
-			span.SetStatus(codes.Error, "test failed")
-		}
-
-		for _, t := range lines {
-			if t.Action != "output" {
-				continue
-			}
-
-			span.AddEvent("log message", trace.WithTimestamp(t.Time), trace.WithAttributes(attribute.Key("output").String(t.Output)))
-		}
-
-		span.End(trace.WithTimestamp(end))
-	}
+	reportSpans(testlines, tracer, ctx)
 
 	fmt.Println(span.SpanContext().TraceID())
 	span.End()
@@ -132,6 +84,12 @@ func main() {
 	err = cmd.Wait()
 	if err != nil {
 		panic(err)
+	}
+}
+
+func reportSpans(testlines map[string][]GoTestLine, tracer trace.Tracer, ctx context.Context) {
+	for pkg, lines := range testlines {
+		reportSpan(ctx, tracer, pkg, lines)
 	}
 }
 
