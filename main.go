@@ -13,24 +13,21 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"os"
 	"os/exec"
+	"strings"
 )
-
-type keyPkgAndTest struct {
-	Package string
-	Test    string
-}
 
 func main() {
 	wd := flag.String("wd", ".", "Current working directory")
-	tp, err := tracerProvider("https://tempo.e127.se:443/api/traces")
-	if err != nil {
-		panic(err)
-	}
-
+	jaegerURL := flag.String("jaeger.url", "http://localhost:14268/api/traces", "URL for collecting Jaeger traces")
 	flag.Parse()
 	path := flag.Arg(0)
 	if path == "" {
 		panic("must provide a path")
+	}
+
+	tp, err := tracerProvider(*jaegerURL)
+	if err != nil {
+		panic(err)
 	}
 
 	err = os.Chdir(*wd)
@@ -38,7 +35,7 @@ func main() {
 		panic(err)
 	}
 
-	cmd := exec.Command("go", "test", "-count=1", "-json", path)
+	cmd := exec.Command("go", "test", "-count=1", "-json", "-short", path)
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {
 		panic(err)
@@ -87,10 +84,73 @@ func main() {
 	}
 }
 
-func reportSpans(testlines map[string][]GoTestLine, tracer trace.Tracer, ctx context.Context) {
-	for pkg, lines := range testlines {
-		reportSpan(ctx, tracer, pkg, lines)
+type hierarchy struct {
+	name     string
+	children map[string]*hierarchy
+}
+
+func (h *hierarchy) Add(c string) bool {
+	if !strings.HasPrefix(c, h.name) {
+		return false
 	}
+	trimmedName := strings.TrimPrefix(c, h.name)
+	trimmedName = strings.TrimPrefix(trimmedName, "/")
+	parts := strings.Split(trimmedName, "/")
+	if len(parts) == 1 {
+		h.children[c] = &hierarchy{
+			name:     c,
+			children: map[string]*hierarchy{},
+		}
+		return true
+	}
+
+	firstLevelChild := h.name + "/" + parts[0]
+	if _, exists := h.children[firstLevelChild]; !exists {
+		h.children[firstLevelChild] = &hierarchy{
+			name:     c,
+			children: map[string]*hierarchy{},
+		}
+	}
+	return h.children[firstLevelChild].Add(c)
+}
+
+func (h *hierarchy) Walk(ctx context.Context, fn func(ctx context.Context, name string) context.Context) {
+	nestCtx := fn(ctx, h.name)
+	for _, c := range h.children {
+		c.Walk(nestCtx, fn)
+	}
+}
+
+func reportSpans(testlines map[string][]GoTestLine, tracer trace.Tracer, ctx context.Context) {
+	const prefixPlaceholder = "REPLACE_ME"
+	commonPrefix := prefixPlaceholder
+
+	for pkg, _ := range testlines {
+		if commonPrefix == prefixPlaceholder {
+			commonPrefix = pkg
+		}
+		if strings.HasPrefix(pkg, commonPrefix) {
+			continue
+		}
+
+		for !strings.HasPrefix(pkg, commonPrefix) {
+			commonPrefix = commonPrefix[:len(commonPrefix)-1]
+		}
+	}
+
+	root := hierarchy{name: commonPrefix, children: map[string]*hierarchy{}}
+	for pkg, _ := range testlines {
+		root.Add(pkg)
+	}
+
+	root.Walk(ctx, func(ctx context.Context, pkg string) context.Context {
+		lines, exists := testlines[pkg]
+		if !exists {
+			return ctx
+		}
+
+		return reportSpan(ctx, tracer, pkg, lines)
+	})
 }
 
 func tracerProvider(url string) (*tracesdk.TracerProvider, error) {

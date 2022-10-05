@@ -79,7 +79,7 @@ func (t *testSpan) Add(depth int, line GoTestLine) {
 	}
 }
 
-func (t *testSpan) Report(ctx context.Context, tracer trace.Tracer) {
+func (t *testSpan) Report(ctx context.Context, tracer trace.Tracer) (context.Context, bool) {
 	spanName := "test/run"
 	if t.test == "" {
 		spanName = "test/package"
@@ -96,6 +96,13 @@ func (t *testSpan) Report(ctx context.Context, tracer trace.Tracer) {
 		attribute.Key("test").String(t.test),
 	)
 
+	for _, child := range t.children {
+		_, ok := child.Report(ctx, tracer)
+		if !ok {
+			t.failed = true
+		}
+	}
+
 	if t.failed {
 		span.SetStatus(codes.Error, "test failed")
 	} else if !t.skipped {
@@ -110,12 +117,10 @@ func (t *testSpan) Report(ctx context.Context, tracer trace.Tracer) {
 		)
 	}
 
-	for _, child := range t.children {
-		child.Report(ctx, tracer)
-	}
+	return ctx, !t.failed
 }
 
-func reportSpan(ctx context.Context, tracer trace.Tracer, pkg string, lines []GoTestLine) {
+func reportSpan(ctx context.Context, tracer trace.Tracer, pkg string, lines []GoTestLine) context.Context {
 	s := newTestSpan(pkg, "")
 	for _, line := range lines {
 		s.Add(0, line)
@@ -123,8 +128,9 @@ func reportSpan(ctx context.Context, tracer trace.Tracer, pkg string, lines []Go
 
 	if s.start.IsZero() || s.end.IsZero() {
 		fmt.Println("either start or end is zero :(", s.start, s.end)
-		return
+		return ctx
 	}
 
-	s.Report(ctx, tracer)
+	ctx, _ = s.Report(ctx, tracer)
+	return ctx
 }
