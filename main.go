@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -46,7 +47,7 @@ func main() {
 		panic(err)
 	}
 	tracer := tp.Tracer("test/go")
-	ctx, span := tracer.Start(context.Background(), "go tests")
+	ctx, span := tracer.Start(context.Background(), "test/go")
 	testlines := map[string][]GoTestLine{}
 	scanner := bufio.NewScanner(pipe)
 	for scanner.Scan() {
@@ -70,6 +71,8 @@ func main() {
 	}
 
 	reportSpans(testlines, tracer, ctx)
+
+	fmt.Println(generateComment(testlines))
 
 	fmt.Println(span.SpanContext().TraceID())
 	span.End()
@@ -97,6 +100,10 @@ func (h *hierarchy) Add(c string) bool {
 	trimmedName = strings.TrimPrefix(trimmedName, "/")
 	parts := strings.Split(trimmedName, "/")
 	if len(parts) == 1 {
+		if _, exists := h.children[c]; exists {
+			return true
+		}
+
 		h.children[c] = &hierarchy{
 			name:     c,
 			children: map[string]*hierarchy{},
@@ -114,8 +121,9 @@ func (h *hierarchy) Add(c string) bool {
 	return h.children[firstLevelChild].Add(c)
 }
 
-func (h *hierarchy) Walk(ctx context.Context, fn func(ctx context.Context, name string) context.Context) {
-	nestCtx := fn(ctx, h.name)
+func (h *hierarchy) Walk(ctx context.Context, fn func(ctx context.Context, tree *hierarchy) context.Context) {
+	nestCtx := fn(ctx, h)
+	fmt.Println(h.name)
 	for _, c := range h.children {
 		c.Walk(nestCtx, fn)
 	}
@@ -143,13 +151,30 @@ func reportSpans(testlines map[string][]GoTestLine, tracer trace.Tracer, ctx con
 		root.Add(pkg)
 	}
 
-	root.Walk(ctx, func(ctx context.Context, pkg string) context.Context {
-		lines, exists := testlines[pkg]
+	root.Walk(ctx, func(ctx context.Context, tree *hierarchy) context.Context {
+		lines, exists := testlines[tree.name]
+
 		if !exists {
-			return ctx
+			var start, end time.Time
+			tree.Walk(ctx, func(ctx context.Context, tree *hierarchy) context.Context {
+				for _, line := range testlines[tree.name] {
+					if start.IsZero() || start.After(line.Time) {
+						start = line.Time
+					}
+					if end.Before(line.Time) {
+						end = line.Time
+					}
+				}
+				return ctx
+			})
+
+			s := newTestSpan(tree.name, "")
+			s.start = start
+			s.end = end
+			return s.Report(ctx, tracer)
 		}
 
-		return reportSpan(ctx, tracer, pkg, lines)
+		return reportSpan(ctx, tracer, tree.name, lines)
 	})
 }
 

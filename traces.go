@@ -79,7 +79,7 @@ func (t *testSpan) Add(depth int, line GoTestLine) {
 	}
 }
 
-func (t *testSpan) Report(ctx context.Context, tracer trace.Tracer) (context.Context, bool) {
+func (t *testSpan) Report(ctx context.Context, tracer trace.Tracer) context.Context {
 	spanName := "test/run"
 	if t.test == "" {
 		spanName = "test/package"
@@ -97,10 +97,7 @@ func (t *testSpan) Report(ctx context.Context, tracer trace.Tracer) (context.Con
 	)
 
 	for _, child := range t.children {
-		_, ok := child.Report(ctx, tracer)
-		if !ok {
-			t.failed = true
-		}
+		child.Report(ctx, tracer)
 	}
 
 	if t.failed {
@@ -117,7 +114,7 @@ func (t *testSpan) Report(ctx context.Context, tracer trace.Tracer) (context.Con
 		)
 	}
 
-	return ctx, !t.failed
+	return ctx
 }
 
 func reportSpan(ctx context.Context, tracer trace.Tracer, pkg string, lines []GoTestLine) context.Context {
@@ -131,6 +128,5 @@ func reportSpan(ctx context.Context, tracer trace.Tracer, pkg string, lines []Go
 		return ctx
 	}
 
-	ctx, _ = s.Report(ctx, tracer)
-	return ctx
+	return s.Report(ctx, tracer)
 }
